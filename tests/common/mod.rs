@@ -6,7 +6,7 @@ use futures_timer::Delay;
 use log::{info, warn};
 use rand::Rng;
 use slog::Drain;
-use std::{collections::HashSet, convert::TryInto, env, time::Duration};
+use std::{collections::HashSet, convert::TryInto, env, mem, time::Duration};
 use tikv_client::{ColumnFamily, Key, RawClient, Result, Transaction, TransactionClient};
 
 const ENV_PD_ADDRS: &str = "PD_ADDRS";
@@ -140,6 +140,17 @@ pub fn gen_u32_keys(num: u32, rng: &mut impl Rng) -> HashSet<Vec<u8>> {
     let mut set = HashSet::new();
     for _ in 0..num {
         set.insert(rng.gen::<u32>().to_be_bytes().to_vec());
+    }
+    set
+}
+
+pub fn gen_u32_keys_with_prefix(num: u32, prefix: &[u8], rng: &mut impl Rng) -> HashSet<Vec<u8>> {
+    let mut set = HashSet::new();
+    for _ in 0..num {
+        let mut buf = Vec::with_capacity(prefix.len() + mem::size_of::<u32>());
+        buf.extend_from_slice(prefix);
+        buf.extend_from_slice(rng.gen::<u32>().to_be_bytes().as_slice());
+        set.insert(buf);
     }
     set
 }

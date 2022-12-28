@@ -192,6 +192,87 @@ async fn txn_cleanup_async_commit_locks() -> Result<()> {
 
 #[tokio::test]
 #[serial]
+async fn txn_make_async_commit_locks() -> Result<()> {
+    let logger = new_logger(slog::Level::Info);
+
+    // init().await?;
+    let scenario = FailScenario::setup();
+
+    // no commit
+    {
+        info!(logger, "test no commit");
+        fail::cfg("after-prewrite", "return").unwrap();
+        defer! {
+            fail::cfg("after-prewrite", "off").unwrap()
+        }
+
+        let client = TransactionClient::new(pd_addrs(), Some(logger.clone())).await?;
+        let keys = write_data(&client, true, true).await?;
+        assert_eq!(count_locks(&client).await?, keys.len());
+
+        // let safepoint = client.current_timestamp().await?;
+        // let options = ResolveLocksOptions {
+        //     async_commit_only: true,
+        //     ..Default::default()
+        // };
+        // client.cleanup_locks(&safepoint, options).await?;
+        //
+        // must_committed(&client, keys).await;
+        // assert_eq!(count_locks(&client).await?, 0);
+    }
+
+    // partial commit
+    {
+        info!(logger, "test partial commit");
+        let percent = 50;
+        fail::cfg("before-commit-secondary", &format!("return({percent})")).unwrap();
+        defer! {
+            fail::cfg("before-commit-secondary", "off").unwrap()
+        }
+
+        let client = TransactionClient::new(pd_addrs(), Some(logger.clone())).await?;
+        let keys = write_data(&client, true, false).await?;
+        thread::sleep(Duration::from_secs(1)); // Wait for async commit to complete.
+        assert_eq!(count_locks(&client).await?, keys.len() * percent / 100);
+
+        // let safepoint = client.current_timestamp().await?;
+        // let options = ResolveLocksOptions {
+        //     async_commit_only: true,
+        //     ..Default::default()
+        // };
+        // client.cleanup_locks(&safepoint, options).await?;
+        //
+        // must_committed(&client, keys).await;
+        // assert_eq!(count_locks(&client).await?, 0);
+    }
+
+    // all committed
+    // {
+    //     info!(logger, "test all committed");
+    //     let client = TransactionClient::new(pd_addrs(), Some(logger.clone())).await?;
+    //     let keys = write_data(&client, true, false).await?;
+    //
+    //     let safepoint = client.current_timestamp().await?;
+    //     let options = ResolveLocksOptions {
+    //         async_commit_only: true,
+    //         ..Default::default()
+    //     };
+    //     client.cleanup_locks(&safepoint, options).await?;
+    //
+    //     must_committed(&client, keys).await;
+    //     assert_eq!(count_locks(&client).await?, 0);
+    // }
+
+    // TODO: test rollback
+
+    // TODO: test region error
+
+    scenario.teardown();
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn txn_cleanup_2pc_locks() -> Result<()> {
     let logger = new_logger(slog::Level::Info);
 
@@ -289,8 +370,10 @@ async fn write_data(
     async_commit: bool,
     commit_error: bool,
 ) -> Result<HashSet<Vec<u8>>> {
+    let prefix = [b'x', 0, 0, 0];
     let mut rng = thread_rng();
-    let keys = gen_u32_keys((TXN_COUNT * KEY_COUNT) as u32, &mut rng);
+    let keys =
+        gen_u32_keys_with_prefix((TXN_COUNT * KEY_COUNT) as u32, prefix.as_slice(), &mut rng);
     let mut txns = Vec::with_capacity(TXN_COUNT);
 
     let mut options = TransactionOptions::new_optimistic()
