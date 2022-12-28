@@ -192,11 +192,27 @@ async fn txn_cleanup_async_commit_locks() -> Result<()> {
 
 #[tokio::test]
 #[serial]
+async fn txn_count_async_commit_locks() -> Result<()> {
+    let logger = new_logger(slog::Level::Info);
+
+    let client = TransactionClient::new(pd_addrs(), Some(logger.clone())).await?;
+    info!(logger, "current locks: {}", count_locks(&client).await?);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
 async fn txn_make_async_commit_locks() -> Result<()> {
     let logger = new_logger(slog::Level::Info);
 
     // init().await?;
     let scenario = FailScenario::setup();
+
+    {
+        let client = TransactionClient::new(pd_addrs(), Some(logger.clone())).await?;
+        info!(logger, "current locks: {}", count_locks(&client).await?);
+    }
 
     // no commit
     {
@@ -208,17 +224,13 @@ async fn txn_make_async_commit_locks() -> Result<()> {
 
         let client = TransactionClient::new(pd_addrs(), Some(logger.clone())).await?;
         let keys = write_data(&client, true, true).await?;
-        assert_eq!(count_locks(&client).await?, keys.len());
-
-        // let safepoint = client.current_timestamp().await?;
-        // let options = ResolveLocksOptions {
-        //     async_commit_only: true,
-        //     ..Default::default()
-        // };
-        // client.cleanup_locks(&safepoint, options).await?;
-        //
-        // must_committed(&client, keys).await;
-        // assert_eq!(count_locks(&client).await?, 0);
+        // assert_eq!(count_locks(&client).await?, keys.len());
+        info!(
+            logger,
+            "write locks: {}, total locks: {}",
+            keys.len(),
+            count_locks(&client).await?
+        );
     }
 
     // partial commit
@@ -233,35 +245,28 @@ async fn txn_make_async_commit_locks() -> Result<()> {
         let client = TransactionClient::new(pd_addrs(), Some(logger.clone())).await?;
         let keys = write_data(&client, true, false).await?;
         thread::sleep(Duration::from_secs(1)); // Wait for async commit to complete.
-        assert_eq!(count_locks(&client).await?, keys.len() * percent / 100);
-
-        // let safepoint = client.current_timestamp().await?;
-        // let options = ResolveLocksOptions {
-        //     async_commit_only: true,
-        //     ..Default::default()
-        // };
-        // client.cleanup_locks(&safepoint, options).await?;
-        //
-        // must_committed(&client, keys).await;
-        // assert_eq!(count_locks(&client).await?, 0);
+                                               // assert_eq!(count_locks(&client).await?, keys.len() * percent / 100);
+        info!(
+            logger,
+            "write locks: {}, total locks: {}",
+            keys.len() * percent / 100,
+            count_locks(&client).await?
+        );
     }
 
     // all committed
-    // {
-    //     info!(logger, "test all committed");
-    //     let client = TransactionClient::new(pd_addrs(), Some(logger.clone())).await?;
-    //     let keys = write_data(&client, true, false).await?;
-    //
-    //     let safepoint = client.current_timestamp().await?;
-    //     let options = ResolveLocksOptions {
-    //         async_commit_only: true,
-    //         ..Default::default()
-    //     };
-    //     client.cleanup_locks(&safepoint, options).await?;
-    //
-    //     must_committed(&client, keys).await;
-    //     assert_eq!(count_locks(&client).await?, 0);
-    // }
+    {
+        info!(logger, "test all committed");
+        let client = TransactionClient::new(pd_addrs(), Some(logger.clone())).await?;
+        let _keys = write_data(&client, true, false).await?;
+
+        info!(
+            logger,
+            "write locks: {}, total locks: {}",
+            0,
+            count_locks(&client).await?
+        );
+    }
 
     // TODO: test rollback
 
@@ -370,7 +375,7 @@ async fn write_data(
     async_commit: bool,
     commit_error: bool,
 ) -> Result<HashSet<Vec<u8>>> {
-    let prefix = [b'x', 0, 0, 0];
+    let prefix = [b't', 0, 0, 0];
     let mut rng = thread_rng();
     let keys =
         gen_u32_keys_with_prefix((TXN_COUNT * KEY_COUNT) as u32, prefix.as_slice(), &mut rng);
