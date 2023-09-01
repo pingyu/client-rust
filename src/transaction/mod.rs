@@ -12,6 +12,7 @@ pub use client::Client;
 pub(crate) use lock::resolve_locks;
 pub(crate) use lock::HasLocks;
 pub use snapshot::Snapshot;
+pub use transaction::BatchMutateOptions;
 pub use transaction::CheckLevel;
 #[doc(hidden)]
 pub use transaction::HeartbeatOption;

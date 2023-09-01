@@ -23,7 +23,7 @@ use rand::Rng;
 use serial_test::serial;
 use tikv_client::backoff::DEFAULT_REGION_BACKOFF;
 use tikv_client::proto::kvrpcpb;
-use tikv_client::transaction::HeartbeatOption;
+use tikv_client::transaction::{BatchMutateOptions, HeartbeatOption};
 use tikv_client::Error;
 use tikv_client::Key;
 use tikv_client::KvPair;
@@ -32,7 +32,7 @@ use tikv_client::Result;
 use tikv_client::TransactionClient;
 use tikv_client::TransactionOptions;
 use tikv_client::Value;
-use tikv_client::{Backoff, BoundRange, CheckLevel, RetryOptions, Transaction};
+use tikv_client::{Backoff, BoundRange, RetryOptions, Transaction};
 
 // Parameters used in test
 const NUM_PEOPLE: u32 = 100;
@@ -1170,7 +1170,12 @@ async fn do_mutate(is_pessimistic: bool) -> Result<()> {
     let client = TransactionClient::new(pd_addrs()).await.unwrap();
     let mut txn = begin_mutate(&client, is_pessimistic).await.unwrap();
 
-    match txn.batch_mutate(mutations).await {
+    let options = if is_pessimistic {
+        BatchMutateOptions::new_pessimistic()
+    } else {
+        BatchMutateOptions::new_optimistic()
+    };
+    match txn.batch_mutate(mutations, options).await {
         Ok(()) => {
             txn.commit().await?;
             Ok(())
@@ -1200,4 +1205,61 @@ async fn verify_mutate(is_pessimistic: bool) {
         res.get(&Key::from("k2".to_owned())),
         Some(Value::from("v2".to_owned())).as_ref()
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn txn_batch_mutate_pessimistic_options() -> Result<()> {
+    init().await?;
+    let client = TransactionClient::new(pd_addrs()).await?;
+
+    let i_to_key = |i: usize| format!("k_{i}").into_bytes();
+    let i_to_val = |i: usize| format!("v_{i}").into_bytes();
+
+    const DATA_COUNT: usize = 100;
+    const LOCK_BATCH_SIZE: usize = 8;
+
+    // Write data
+    {
+        let mut mutations = Vec::with_capacity(DATA_COUNT);
+        for i in 0..DATA_COUNT {
+            mutations.push(kvrpcpb::Mutation {
+                op: kvrpcpb::Op::Put.into(),
+                key: i_to_key(i),
+                value: i_to_val(i),
+                ..Default::default()
+            });
+        }
+
+        let mut txn = client.begin_pessimistic().await.unwrap();
+        txn.batch_mutate(
+            mutations,
+            BatchMutateOptions::new_pessimistic().lock_batch_size(LOCK_BATCH_SIZE),
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+    }
+
+    // Read and verify
+    {
+        let mut snapshot = client.snapshot(
+            client.current_timestamp().await.unwrap(),
+            TransactionOptions::new_pessimistic(),
+        );
+        let res: HashMap<Key, Value> = snapshot
+            .scan(.., DATA_COUNT as u32 + 1)
+            .await
+            .unwrap()
+            .map(|pair| (pair.0, pair.1))
+            .collect();
+        assert_eq!(res.len(), DATA_COUNT);
+        for i in 0..DATA_COUNT {
+            assert_eq!(
+                res.get(&Key::from(i_to_key(i))),
+                Some(Value::from(i_to_val(i))).as_ref()
+            );
+        }
+    }
+    Ok(())
 }

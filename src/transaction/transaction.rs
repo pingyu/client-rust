@@ -529,7 +529,7 @@ impl<Cod: Codec, PdC: PdClient<Codec = Cod>> Transaction<Cod, PdC> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tikv_client::{Key, Config, TransactionClient, proto::kvrpcpb};
+    /// # use tikv_client::{Key, Config, TransactionClient, proto::kvrpcpb, transaction::BatchMutateOptions};
     /// # use futures::prelude::*;
     /// # futures::executor::block_on(async {
     /// # let client = TransactionClient::new(vec!["192.168.0.100", "192.168.0.101"]).await.unwrap();
@@ -547,22 +547,44 @@ impl<Cod: Codec, PdC: PdClient<Codec = Cod>> Transaction<Cod, PdC> {
     ///         ..Default::default()
     ///     },
     /// ];
-    /// txn.batch_mutate(mutations).await.unwrap();
+    /// txn.batch_mutate(mutations, BatchMutateOptions::new_optimistic()).await.unwrap();
     /// txn.commit().await.unwrap();
     /// # });
     /// ```
     pub async fn batch_mutate(
         &mut self,
         mutations: impl IntoIterator<Item = kvrpcpb::Mutation>,
+        options: BatchMutateOptions,
     ) -> Result<()> {
         debug!("invoking transactional batch mutate request");
         self.check_allow_operation().await?;
         if self.is_pessimistic() {
-            let mutations: Vec<kvrpcpb::Mutation> = mutations.into_iter().collect();
-            self.pessimistic_lock(mutations.iter().map(|m| Key::from(m.key.clone())), false)
-                .await?;
-            for m in mutations {
+            let mut mutations: Vec<kvrpcpb::Mutation> = mutations.into_iter().collect();
+            if options.need_sort {
+                // Sort to reduce involved regions in a lock batch.
+                mutations.sort_by(|a, b| a.key.cmp(&b.key));
+            }
+
+            let lock_batch_size =
+                if options.lock_batch_size == 0 || options.lock_batch_size > mutations.len() {
+                    mutations.len()
+                } else {
+                    options.lock_batch_size
+                };
+
+            let mut keys = Vec::with_capacity(lock_batch_size);
+            for (i, m) in mutations.into_iter().enumerate() {
+                keys.push(Key::from(m.key.clone()));
+
+                // Should mutate buffer first. Otherwise some keys will not be unlock when rollback the transaction.
                 self.buffer.mutate(m);
+
+                if i + 1 % lock_batch_size == 0 {
+                    self.pessimistic_lock(keys.drain(..), false).await?;
+                }
+            }
+            if !keys.is_empty() {
+                self.pessimistic_lock(keys, false).await?;
             }
         } else {
             for m in mutations.into_iter() {
@@ -1013,6 +1035,8 @@ const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(MAX_TTL / 2);
 pub const TXN_COMMIT_BATCH_SIZE: u64 = 16 * 1024;
 const TTL_FACTOR: f64 = 6000.0;
 
+const DEFAULT_MUTATE_LOCK_BATCH_SIZE: usize = 64;
+
 /// Optimistic or pessimistic transaction.
 #[derive(Clone, PartialEq, Debug)]
 pub enum TransactionKind {
@@ -1176,6 +1200,41 @@ pub enum CheckLevel {
 impl HeartbeatOption {
     pub fn is_auto_heartbeat(&self) -> bool {
         !matches!(self, HeartbeatOption::NoHeartbeat)
+    }
+}
+
+#[derive(Default)]
+pub struct BatchMutateOptions {
+    /// Whether to sort the mutations, to improve efficiency of pessimistic locking.
+    need_sort: bool,
+
+    /// The batch size of pessimistic locking.
+    ///
+    /// Generally, the bigger the batch size, the more efficient the pessimistic locking is.
+    /// But at the same time, when rollback the transaction, more keys will be rolled back even if they have not been locked.
+    lock_batch_size: usize,
+}
+
+impl BatchMutateOptions {
+    pub fn new_optimistic() -> BatchMutateOptions {
+        BatchMutateOptions::default()
+    }
+
+    pub fn new_pessimistic() -> BatchMutateOptions {
+        BatchMutateOptions {
+            need_sort: true,
+            lock_batch_size: DEFAULT_MUTATE_LOCK_BATCH_SIZE,
+        }
+    }
+
+    pub fn need_sort(mut self, need_sort: bool) -> BatchMutateOptions {
+        self.need_sort = need_sort;
+        self
+    }
+
+    pub fn lock_batch_size(mut self, lock_batch_size: usize) -> BatchMutateOptions {
+        self.lock_batch_size = lock_batch_size;
+        self
     }
 }
 
