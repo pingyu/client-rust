@@ -985,7 +985,10 @@ impl<Cod: Codec, PdC: PdClient> Drop for Transaction<Cod, PdC> {
         if std::thread::panicking() {
             return;
         }
-        let mut status = futures::executor::block_on(self.status.write());
+        let mut status = futures::executor::block_on(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            self.status.write().await
+        });
         if *status == TransactionStatus::Active {
             match self.options.check_level {
                 CheckLevel::Panic => {
@@ -1541,6 +1544,34 @@ mod tests {
             assert!(heartbeat_txn.commit().await.is_ok());
         });
         heartbeat_txn_handle.await.unwrap();
+        Ok(())
+    }
+
+    async fn txn_task() {
+        let pd_client = Arc::new(MockPdClient::default());
+        let options = TransactionOptions::new_pessimistic().read_only();
+        let txn = Transaction::new(Timestamp::default(), pd_client, options);
+        txn.check_allow_operation().await.unwrap();
+        drop(txn);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_drop_st() -> Result<(), io::Error> {
+        txn_task().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_transaction_drop_mt() -> Result<(), io::Error> {
+        const CONCURRENCY: usize = 10;
+        let mut handles = Vec::with_capacity(CONCURRENCY);
+        for _ in 0..CONCURRENCY {
+            handles.push(tokio::spawn(txn_task()));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
         Ok(())
     }
 }
