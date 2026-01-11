@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_recursion::async_recursion;
@@ -38,6 +39,12 @@ use crate::Error;
 use crate::Result;
 use crate::Timestamp;
 
+static DISPATCH_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_dispatch_request_id() -> u64 {
+    DISPATCH_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// A plan for how to execute a request. A user builds up a plan with various
 /// options, then exectutes it.
 #[async_trait]
@@ -61,9 +68,10 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
     type Result = Req::Response;
 
     async fn execute(&self) -> Result<Self::Result> {
+        let request_id = next_dispatch_request_id();
         let stats = tikv_stats(self.request.label());
         if self.request.label() == "kv_prewrite" || self.request.label() == "kv_commit" {
-            info!("req {}", self.request.to_str())
+            info!("req_id={} req {}", request_id, self.request.to_str())
         }
         let result = self
             .kv_client
@@ -77,7 +85,7 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
                 .downcast()
                 .expect("Downcast failed: request and response type mismatch");
             if self.request.label() == "kv_prewrite" || self.request.label() == "kv_commit" {
-                info!("resp {:?}", resp);
+                info!("req_id={} resp {:?}", request_id, resp);
             }
             resp
         })
