@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
-use tokio::task::JoinSet;
 use futures::prelude::*;
 use log::debug;
 use log::error;
 use log::info;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 use crate::backoff::Backoff;
